@@ -1,0 +1,376 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"github.com/hyperledger/fabric/core/chaincode/shim"
+	pb "github.com/hyperledger/fabric/protos/peer"
+)
+
+const (
+	Failed  = -1 //失败
+	Success = 0  //成功
+)
+// SimpleChaincode example simple Chaincode implementation
+type SimpleChaincode struct {
+}
+
+type HandleFunc struct {
+	Edit func()
+}
+
+type OptInfo struct {
+	BAR_CODE         string `json:"BAR_CODE "`        //“光模块条码(DMS获取)”
+	ITEM_CODE        string `json:"ITEM_CODE "`       //“产品编码(可关联产品具体信息)”
+	OWNER            string `json:"OWNER"`            //“光模块持有者”
+	OWNER_CODE       string `json:"OWNER_CODE"`       //“光模块持有者编码”
+	Contractno       string `json:"Contractno"`       //“合同号(DMS获取)”
+	SHIPMENT_NUMBER  string `json:"SHIPMENT_NUMBER"`  //“转移单号(对应到我司为签收单号 , DMS 获取;对应到代理商,为进行转移活动时的运单号)”
+    RECEIVE_CODE     string `json:"RECEIVE_CODE"`     //“收货方编码”
+    RECEIVE_NAME     string `json:"RECEIVE_NAME"`     //“收货方名称(DMS获取)”
+    NODE_DATE        string `json:"NODE_DATE"`        //“节点日期（发货日期）”
+    NEW_FLAG         string `json:"NEW_FLAG"`         //“是否是最近一次的条码信息(Y)---是否退货重新发的(N)”
+    TransferPermission    string `json:"TransferPermission"`    //“是否允许收货方转移(1.允许 2.禁止: 根据合同号判断)”
+	TransferNotes    string `json:"TransferNotes"`    //“转移备注”
+    OptStatus        string `json:"OptStatus"`        //“光模块状态inuse/intransfer”
+}
+
+
+func main() {
+	err := shim.Start(new(SimpleChaincode))
+	if err != nil {
+		fmt.Printf("Error starting simple chaincode:%s", err)
+	}
+}
+
+func OptEdit(opt *OptInfo , paras []string) int {
+
+	for i, _ := range paras {
+
+		if i%2 == 0 {
+			switch paras[i] {
+			case "BAR_CODE":
+				opt.BAR_CODE = paras[i+1]
+			case "ITEM_CODE":
+				opt.ITEM_CODE = paras[i+1]
+			case "OWNER":
+			    opt.OWNER = paras[i+1]
+			case "OWNER_CODE":
+				opt.OWNER_CODE = paras[i+1]
+			case "Contractno":
+				opt.Contractno = paras[i+1]
+			case "SHIPMENT_NUMBER":
+                opt.SHIPMENT_NUMBER = paras[i+1]
+			case "RECEIVE_CODE":
+				opt.RECEIVE_CODE = paras[i+1]
+			case "RECEIVE_NAME":
+				opt.RECEIVE_NAME = paras[i+1]
+			case "NODE_DATE":
+				opt.NODE_DATE = paras[i+1]
+			case "NEW_FLAG":
+				opt.NEW_FLAG = paras[i+1]
+			case "TransferPermission":
+				opt.TransferPermission = paras[i+1]
+			case "TransferNotes":
+				opt.TransferNotes = paras[i+1]
+			case "OptStatus":
+				opt.OptStatus = paras[i+1]
+		    default:
+			    return Failed
+			}
+		}
+	}
+	return Success
+}
+
+func (t *SimpleChaincode) Init(stub shim.ChaincodeStubInterface) pb.Response {
+	fmt.Println("opt chaincode Init")
+	return shim.Success(nil)
+}
+
+func (t *SimpleChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response {
+	function, args := stub.GetFunctionAndParameters()
+	fmt.Println("invoke is running" + function)
+
+	if function == "queryinfo" {
+		return t.queryinfo(stub, args)
+	} else if function == "edit" {
+		return t.edit(stub, args)
+	} else if function == "create" {
+		return t.create(stub, args)
+	} else if function == "tqueryByCode" {
+        return t.tqueryByCode(stub, args)
+    } else if function == "queryByinuse" {
+        return t.queryByinuse(stub, args)
+    } else if function == "receive" {
+		return t.receive(stub, args)
+    } else if function == "querytranstime" {
+        return t.querytranstime(stub, args)
+    }
+	return shim.Error("Received unknown function invocation")
+}
+func (t *SimpleChaincode) create(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	//判断新增的数据，是否包含全部的字段，是完整的信息
+	if len(args) != 13 {
+		return shim.Error("Incrrect number of arguments.Expecting 13")
+	}
+	fmt.Println("invoke is running 000")
+	//optInfoDatas, _ := stub.GetState(args[0])
+	//if optInfoDatas != nil {
+		
+		//return shim.Error(fmt.Sprintf("optInfo has been added, can not create again."))
+	//}
+    fmt.Println("invoke is running 001")
+	var stuff = OptInfo{BAR_CODE: args[0], ITEM_CODE: args[1], OWNER: args[2], OWNER_CODE: args[3], Contractno: args[4], SHIPMENT_NUMBER: args[5],
+		RECEIVE_CODE: args[6], RECEIVE_NAME: args[7], NODE_DATE: args[8], NEW_FLAG: args[9], TransferPermission: args[10], TransferNotes: args[11],
+	    OptStatus: args[12]}
+	stuffBytes, err := json.Marshal(stuff)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+    fmt.Println("invoke is running 002")
+	err = stub.PutState(args[0], stuffBytes) //以BAR_CODE为key存储
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	fmt.Println("invoke is running 003")
+	return shim.Success(nil)
+}
+func (t *SimpleChaincode) edit(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	//输入条码及要修改的数据即可,根据不同的转移业务 修改的字段不同
+	Optvalue, err := stub.GetState(args[0]) //通过条码查询数据库，是否存在数据,查询失败则返回.
+	if err != nil {
+		return shim.Error("Failed to get Data，The BAR_CODE does not exit!") //该条码并不存在，返回失败
+	}
+
+	paras := args[1:]
+
+	var OptInfos OptInfo
+	err = json.Unmarshal(Optvalue, &OptInfos) //将查询的数据转换为Optvalue格式数据，以做进一步处理
+	
+	re := OptEdit(&OptInfos, paras)
+	if re == Failed {
+		return shim.Error("input invailed parameters")
+	}
+
+	BdatasJon, err := json.Marshal(OptInfos)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	stub.PutState(args[0], BdatasJon)
+	return shim.Success(nil)
+}
+func (t *SimpleChaincode) receive(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	//args[0]即key,为需要转移的光模块的条码，args[1]为发货人的ID-WONER_CODE,args[2]为接收人的ID-RECEIVE_CODE,args[3]为收货日期
+	optvalue, err := stub.GetState(args[0]) //通过条码查询数据库，是否存在数据,查询失败则返回
+	if err != nil {
+		return shim.Error("Failed to get Data")
+	}
+
+	tcode := args[1]  //获取发货人编码
+	rcode := args[2]  //获取收货人编码
+	rdate := args[3]  //获取收货日期
+	var OptInfos OptInfo
+	err = json.Unmarshal(optvalue, &OptInfos) //将查询的数据转换为StuffMyMaterial格式数据，以做进一步处理
+
+	if OptInfos.OWNER_CODE == tcode { //如果该条码确实属于发货方，则修改物料状态。否则返回错误
+		if OptInfos.OptStatus == "1" && OptInfos.RECEIVE_CODE == rcode {
+			OptInfos.OptStatus = "2" //这里修改物料状态为2 表示持有
+			OptInfos.OWNER_CODE = rcode //这里修改持有者为接收者编码
+			OptInfos.OWNER = OptInfos.RECEIVE_NAME //这里修改持有者为接收者
+		    OptInfos.NODE_DATE = rdate //这里修改收货日期		
+		    OptInfos.TransferNotes = "" //清空转移信息
+		    OptInfos.RECEIVE_CODE = ""  //清空接受者信息
+			OptInfos.RECEIVE_NAME = ""  //清空接受者
+		    fmt.Printf("transfer ok \r\n")
+		} else {
+			fmt.Printf("\r\n materials %d do not intransfer,can not transfer \r\n", args[0])
+			return shim.Error("RECEIVE is err or OptStatus not intransfer ")
+		}
+	} else {
+		fmt.Printf("\r\n %s do not have this optical moudel  %v \r\n", tcode, args[0])
+		return shim.Error("do not have this material")
+	}
+	BdatasJon, err := json.Marshal(OptInfos)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	stub.PutState(args[0], BdatasJon)
+
+	return shim.Success(nil)
+}
+func (t *SimpleChaincode) tqueryByCode(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+    //   查询编码是接收者的  OptStatus 1 转移中  2 表示持有中的状态
+	if len(args) == 1 {
+		rcode := args[0]
+		queryString := fmt.Sprintf("{\"selector\":{\"RECEIVE_CODE\":\"%s\",\"OptStatus\":\"1\"}}", rcode)	
+	    queryResults, err := getQueryResultForQueryString(stub, queryString)
+	    if err != nil {
+		    return shim.Error(err.Error())
+	    }
+		return shim.Success(queryResults)
+		//   查询编码是接收者和转移单号的
+	}else if len(args) == 2 {
+	    rcode := args[0]
+		S_NUMBER := args[1]
+		// ostatus := 1
+		queryString := fmt.Sprintf("{\"selector\":{\"RECEIVE_CODE\":\"%s\",\"SHIPMENT_NUMBER\":\"%s\",\"OptStatus\":\"1\"}}", rcode, S_NUMBER)	
+	    queryResults, err := getQueryResultForQueryString(stub, queryString)
+	    if err != nil {
+		    return shim.Error(err.Error())
+	    }
+		return shim.Success(queryResults)
+	}else {
+	    return shim.Error("Incorrect number of arguments. error")
+	}
+}
+
+func (t *SimpleChaincode) queryByinuse(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	if len(args) < 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+    //   查询编码是持有者的
+	if len(args) == 1 {
+		woner := args[0]
+		queryString := fmt.Sprintf("{\"selector\":{\"OWNER_CODE\":\"%s\",\"OptStatus\":\"2\"}}", woner)	
+	    queryResults, err := getQueryResultForQueryString(stub, queryString)
+	    if err != nil {
+		    return shim.Error(err.Error())
+	    }
+		return shim.Success(queryResults)
+		//   查询编码是持有者和转移单号的
+	}else if len(args) == 2 {
+	    woner := args[0]
+		S_NUMBER := args[1]
+		queryString := fmt.Sprintf("{\"selector\":{\"OWNER_CODE\":\"%s\",\"SHIPMENT_NUMBER\":\"%s\",\"OptStatus\":\"2\"}}", woner, S_NUMBER)	
+	    queryResults, err := getQueryResultForQueryString(stub, queryString)
+	    if err != nil {
+		    return shim.Error(err.Error())
+	    }
+		return shim.Success(queryResults)
+	}else {
+	    return shim.Error("Incorrect number of arguments. error")
+	}
+}
+
+func getQueryResultForQueryString(stub shim.ChaincodeStubInterface, queryString string) ([]byte, error) {
+
+	fmt.Printf("- getQueryResultForQueryString queryString:\n%s\n", queryString)
+
+	resultsIterator, err := stub.GetQueryResult(queryString)
+	if err != nil {
+		return nil, err
+	}
+	defer resultsIterator.Close()
+
+	// buffer is a JSON array containing QueryRecords
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+
+	bArrayMemberAlreadyWritten := false
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return nil, err
+		}
+		// Add a comma before array members, suppress it for the first array member
+		if bArrayMemberAlreadyWritten == true {
+			buffer.WriteString(",")
+		}
+		buffer.WriteString("{\"Key\":")
+		buffer.WriteString("\"")
+		buffer.WriteString(queryResponse.Key)
+		buffer.WriteString("\"")
+
+		buffer.WriteString(", \"Record\":")
+		// Record is a JSON object, so we write as-is
+		buffer.WriteString(string(queryResponse.Value))
+		buffer.WriteString("}")
+		bArrayMemberAlreadyWritten = true
+	}
+	buffer.WriteString("]")
+
+	fmt.Printf("- getQueryResultForQueryString queryResult:\n%s\n", buffer.String())
+
+	return buffer.Bytes(), nil
+}
+func (t *SimpleChaincode) querytranstime(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	type AuditHistory struct {
+		TxId    string   `json:"txId"`
+		Value   OptInfo   `json:"value"`
+	}
+	var history []AuditHistory;
+	var property OptInfo
+
+	if len(args) != 1 {
+		return shim.Error("Incorrect number of arguments. Expecting 1")
+	}
+
+	propertyId := args[0]
+	fmt.Printf("- start getHistoryForProperty: %s\n", propertyId)
+
+	// Get History
+	resultsIterator, err := stub.GetHistoryForKey(propertyId)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	defer resultsIterator.Close()
+
+	for resultsIterator.HasNext() {
+		historyData, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+
+		var tx AuditHistory
+		tx.TxId = historyData.TxId                     //copy transaction id over
+		json.Unmarshal(historyData.Value, &property)     //un stringify it aka JSON.parse()
+		if historyData.Value == nil {                  //marble has been deleted
+			var emptyProperty OptInfo
+			tx.Value = emptyProperty                //copy nil marble
+		} else {
+			json.Unmarshal(historyData.Value, &property) //un stringify it aka JSON.parse()
+			tx.Value = property                      //copy marble over
+		}
+		history = append(history, tx)              //add this tx to the listt
+	}
+	fmt.Printf("- getHistoryForProperty returning:\n%s", history)
+
+	//change to array of bytes
+	historyAsBytes, _ := json.Marshal(history)     //convert to array of bytes
+	return shim.Success(historyAsBytes)
+}
+func (t *SimpleChaincode) queryinfo(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	//输入条码key值，查询信息
+	key := args[0]
+	var err error
+	optdates, err := stub.GetState(key)
+	if err != nil {
+		jsonResp := "{\"Error\":\"Failed to get state for " + key + "\"}"
+		return shim.Error(jsonResp)
+	}
+	if optdates == nil {
+		fmt.Printf("Data null!")
+		return shim.Success([]byte("{}"))
+	}
+	
+	var Adatas OptInfo
+	err = json.Unmarshal(optdates, &Adatas)
+	if err != nil {
+		shim.Error(err.Error())
+	}
+	jsonResp := "{\"BAR_CODE\":\"" + key + "\",\"ITEM_CODE\":\"" + string(Adatas.ITEM_CODE) + "\",\"OWNER\":\"" + string(Adatas.OWNER) + "\",\"OWNER_CODE\":\"" + string(Adatas.OWNER_CODE) + "\",\"Contractno\":\"" + string(Adatas.Contractno) + 
+		"\",\"SHIPMENT_NUMBER\":\"" + string(Adatas.SHIPMENT_NUMBER) + "\",\"RECEIVE_CODE\":\"" + string(Adatas.RECEIVE_CODE) + "\",\"RECEIVE_NAME\":\"" + string(Adatas.RECEIVE_NAME) + "\",\"NODE_DATE\":\"" + string(Adatas.NODE_DATE) + "\",\"NEW_FLAG\":\"" + string(Adatas.NEW_FLAG) + "\",\"TransferPermission\":\"" + string(Adatas.TransferPermission) + 
+		"\",\"TransferNotes\":\"" + string(Adatas.TransferNotes) + "\",\"OptStatus\":\"" + string(Adatas.OptStatus) + "\"}"
+	fmt.Printf("Query Response:%s\n", jsonResp)
+	return shim.Success([]byte(jsonResp))
+}
